@@ -63,7 +63,7 @@ export function evaluateLaunchFactoryHandoff(
     !digestMatches(plan.scope_digest)) return { status: "awaiting_plan" };
 
   const exactApprovals = input.approvals.filter((value) =>
-    isRecord(value) && value.project_id === undefined &&
+    isRecord(value) && value.project_id === input.projectId &&
     value.plan_version === plan.version && value.decision === "approved" &&
     value.plan_digest === plan.payload_digest && value.scope_digest === plan.scope_digest &&
     typeof value.id === "string",
