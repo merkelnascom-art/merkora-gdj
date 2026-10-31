@@ -81,7 +81,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       return NextResponse.json({ error: "Cette demande de lancement existe déjà." }, { status: 409 });
     }
 
-    const jobResult = await callUserData("project_factory_jobs", "POST", token, {
+    const jobPayload = {
       project_id: projectId, plan_version: body.planVersion,
       plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
       status: "queued", manifest: {
@@ -95,27 +95,32 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       },
       requested_by: user.id, authorized_by: user.id,
       approval_ids: exactApprovalRows.map((approval) => approval.id), correlation_id: body.correlationId,
-    }, "return=representation");
-    if (!jobResult.ok) return NextResponse.json(
-      { error: jobResult.status === 409 ? "Un travail existe déjà pour cet identifiant de corrélation." : "La base a refusé la création du travail. Vérifiez les trois validations et réessayez." },
-      { status: jobResult.status === 403 ? 403 : jobResult.status === 409 ? 409 : 502 },
-    );
-    const job = Array.isArray(jobResult.data) ? jobResult.data[0] : null;
-    if (!isRecord(job) || typeof job.id !== "string") {
-      return NextResponse.json({ error: "Le travail a été créé, mais son identifiant n'a pas été retourné. Vérification administrateur nécessaire." }, { status: 502 });
+    };
+    const handoffResult = await callUserData("rpc/create_factory_job_with_tasks", "POST", token, {
+      p_job: jobPayload,
+      p_tasks: TASKS,
+    });
+    if (!handoffResult.ok) {
+      const databaseError = isRecord(handoffResult.data) ? handoffResult.data : {};
+      const duplicate = handoffResult.status === 409 || databaseError.code === "23505";
+      return NextResponse.json(
+        { error: duplicate
+          ? "Un travail existe déjà pour cet identifiant de corrélation."
+          : "La base a refusé la création atomique du travail et de ses étapes. Aucun travail partiel n'a été conservé." },
+        { status: duplicate ? 409 : handoffResult.status === 403 ? 403 : 502 },
+      );
     }
-
-    const taskResult = await callUserData("project_factory_tasks", "POST", token,
-      TASKS.map((task) => ({ ...task, job_id: job.id, project_id: projectId })),
-      "return=representation",
-    );
-    if (!taskResult.ok) {
-      return NextResponse.json({ error: "Le travail est créé, mais ses étapes initiales n'ont pas toutes été enregistrées. Ne relancez pas : une réconciliation administrateur est nécessaire.", jobId: job.id }, { status: 502 });
+    const handoff = isRecord(handoffResult.data) ? handoffResult.data : null;
+    if (!handoff || typeof handoff.job_id !== "string" || handoff.task_count !== TASKS.length) {
+      return NextResponse.json(
+        { error: "La base a répondu avec un résultat de fabrication inattendu. Vérification administrateur nécessaire." },
+        { status: 502 },
+      );
     }
 
     return NextResponse.json({
-      created: true, jobId: job.id, status: "queued",
-      taskCount: TASKS.length, executionStarted: false,
+      created: true, jobId: handoff.job_id, status: "queued",
+      taskCount: handoff.task_count, executionStarted: false,
       message: "Le travail est préparé. Aucun agent ni déploiement n'a été lancé.",
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
