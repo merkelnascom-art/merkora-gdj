@@ -71,11 +71,14 @@ declare
   v_project_id text;
   v_task_count integer;
 begin
-  if jsonb_typeof(p_job) <> 'object'
-     or jsonb_typeof(p_tasks) <> 'array'
-     or jsonb_array_length(p_tasks) < 1
-     or jsonb_array_length(p_tasks) > 20 then
+  if jsonb_typeof(p_job) is distinct from 'object' then
     raise exception 'invalid_factory_job_payload' using errcode = '22023';
+  end if;
+  if jsonb_typeof(p_tasks) is distinct from 'array' then
+    raise exception 'invalid_factory_task_payload' using errcode = '22023';
+  end if;
+  if jsonb_array_length(p_tasks) < 1 or jsonb_array_length(p_tasks) > 20 then
+    raise exception 'invalid_factory_task_count' using errcode = '22023';
   end if;
 
   v_project_id := p_job ->> 'project_id';
