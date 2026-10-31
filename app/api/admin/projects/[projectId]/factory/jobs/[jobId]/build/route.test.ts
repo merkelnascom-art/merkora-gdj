@@ -67,8 +67,8 @@ beforeEach(() => {
     if (method === "GET" && path.startsWith("project_memory_plan_versions?select")) return { ok: true, status: 200, data: [plan] };
     if (method === "GET" && path.startsWith("project_memory_approvals?select")) return { ok: true, status: 200, data: approvals };
     if (method === "GET" && path.startsWith("user_projects?select")) return { ok: true, status: 200, data: [project] };
-    if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "request-1", user_id: "owner-1", project_id: project.id }] };
-    if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "request-1", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 20000 }] };
+    if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "d1c2d3e4-f567-4890-8abc-1234567890ab", user_id: "owner-1", project_id: project.id }] };
+    if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "d1c2d3e4-f567-4890-8abc-1234567890ab", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 20000 }] };
     if (method === "GET" && path.startsWith("project_factory_tasks?select")) return { ok: true, status: 200, data: tasks };
     if (method === "PATCH" && path.includes("status=eq.queued")) return { ok: true, status: 200, data: [{ ...job, status: "building" }] };
     if (method === "POST" && path === "project_factory_evidence") return { ok: true, status: 201, data: [
@@ -110,8 +110,8 @@ describe("POST factory job build", () => {
       if (method === "GET" && path.startsWith("project_memory_plan_versions?select")) return { ok: true, status: 200, data: [plan] };
       if (method === "GET" && path.startsWith("project_memory_approvals?select")) return { ok: true, status: 200, data: approvals };
       if (method === "GET" && path.startsWith("user_projects?select")) return { ok: true, status: 200, data: [project] };
-      if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "request-1", user_id: "owner-1", project_id: project.id }] };
-      if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "request-1", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 19999 }] };
+      if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "d1c2d3e4-f567-4890-8abc-1234567890ab", user_id: "owner-1", project_id: project.id }] };
+      if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "d1c2d3e4-f567-4890-8abc-1234567890ab", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 19999 }] };
       return { ok: true, status: 200, data: [] };
     });
     const response = await POST(request(), context);
