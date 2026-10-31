@@ -160,3 +160,31 @@ Do not silently add this check to the existing launch route until its product im
 5. No worker may claim jobs until atomic leases, consent revalidation, cancellation, retry limits and budget checks exist.
 
 This was a read-only audit. No customer data, RLS policy, schema, deployment or production code was changed.
+## Implementation progress — 2026-10-31
+
+### Implemented on the reconciliation branch (source changes only)
+
+- The factory-job API now selects `ai_processing_consent` and refuses creation unless the exact approved `client_scope` row for the same project, plan version, plan digest and scope digest explicitly has consent set to `true`.
+- Added a regression test for missing client AI-processing consent.
+- Added migration `supabase/migrations/20261031100000_enforce_factory_ai_processing_consent.sql`. It updates the factory-job INSERT RLS policy so a direct authenticated Supabase Data API insert must also have an exact approved client-scope row with `ai_processing_consent = true`.
+- The same migration adds `public.create_factory_job_with_tasks(jsonb,jsonb)`, a `SECURITY INVOKER` RPC. It inserts the job and all task rows in one PostgreSQL transaction; existing RLS policies still govern both inserts. It is executable by `authenticated`, not `anon` or `public`.
+- The API now calls this RPC once instead of making two separate inserts. The existing unique `(project_id, correlation_id)` index remains the final duplicate-race guard.
+- The factory API response still explicitly states `executionStarted: false`; no model invocation, repository write or deployment is started.
+
+### Source verification
+
+- Re-fetched the API route, regression test and migration from this branch after commits. Verified that the route uses the atomic RPC, checks explicit consent, the test covers missing consent, and the migration contains both the RLS consent guard and atomic function.
+- Live Supabase catalog was inspected read-only to confirm the required columns, existing unique correlation index, task uniqueness constraint and composite job/task project relationship before authoring the RPC.
+- No tests, typecheck or build have been executed in a local checkout during this session. GitHub source re-fetch is not a substitute for runtime verification.
+- The migration has **not** been applied to the connected Supabase project. Until it is applied and verified, the live database RLS policy remains unchanged and the direct-API consent bypass remains open on that database.
+- No Vercel deployment was triggered. Production remains untouched.
+
+### Remaining blockers
+
+1. Apply and verify the migration in the intended Supabase environment after review; do not assume the GitHub migration file has changed the live database.
+2. Run `npm ci`, `npm run typecheck`, `npm test` and `npm run build` on this branch; fix any failures.
+3. Add a safe, admin-reviewed association for commercial requests that lack an owner-matched `user_projects` row. Do not auto-create or guess the Love Ways mapping.
+4. Implement launch-to-job idempotent handoff only after the association and exact plan/approval/consent checks are available.
+5. Implement a durable worker with atomic leases, retries, cancellation, budgets, audit evidence and a separate human delivery/deployment authorization.
+
+These changes are committed to the isolated feature branch only. They are not a live database or production release.
