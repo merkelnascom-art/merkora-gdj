@@ -121,3 +121,42 @@ Before Love Ways can enter the factory, the product needs an explicit admin-revi
 The second option is a data mutation and must be separately reviewed, must preserve the original request/quote/invoice/payment/launch records, and must not duplicate the commercial project.
 
 Student Vision has a relational match, but factory execution still remains blocked until its exact plan, three approvals and AI-processing consent exist. The current database inspection showed zero factory jobs and zero approval rows at the time of the read.
+
+## Additional security and schema audit (read-only, 2026-10-31)
+
+A direct source review of the commercial branch and a read-only inspection of the live Supabase catalog found the following:
+
+### Schema facts
+
+- `client_project_launches.request_id` has a foreign key to `client_requests.id` and a unique constraint, so one official launch is allowed per commercial request.
+- `client_requests.project_id` and `user_projects.id` are both text columns, but the catalog inspection did not show a foreign key between them. Their relationship is currently an application-level convention, not a database-enforced relation.
+- `project_memory_plan_versions.project_id` references `user_projects.id`.
+- `project_memory_approvals.project_id` references `user_projects.id` and approvals carry a non-null `ai_processing_consent` boolean.
+- `project_factory_jobs` stores project, plan version/digests, approval IDs and correlation ID. It has no persisted commercial `launch_id` association in its current column set.
+- The existing factory endpoint performs separate REST inserts for the job and tasks. A task insert failure can therefore leave a job without its full task set.
+
+### Consent enforcement gap
+
+The commercial branch factory-job route fetches approval rows and checks the exact approval kinds, decision, plan digest and scope digest. It does not select or explicitly require `ai_processing_consent = true` on the client-scope approval.
+
+More importantly, the live `project_factory_jobs` INSERT RLS policy also checks the three approval kinds and matching plan digests, but its predicate does not check `ai_processing_consent`. The approval table contains the consent field, but its existence alone is not enforcement.
+
+**Required fix before any factory job can be created:** enforce explicit, current client AI-processing consent at both the server route and the database INSERT boundary. The consent must be tied to the same project, plan version, plan digest and scope digest as the job. A route-only check is insufficient because an authenticated admin token can call the Supabase Data API directly.
+
+No policy or schema change was applied during this audit.
+
+### Launch-to-project gap
+
+The commercial launch route verifies the invoice, published and accepted quote version, confirmed payments and duplicate launch. It does not verify that the request has an owner-matched `user_projects` row before recording the launch. This is why an official commercial launch can exist without a factory-addressable project, as observed for Love Ways.
+
+Do not silently add this check to the existing launch route until its product impact is reviewed: it could block future legitimate commercial launches. Instead, add an explicit admin-reviewed reconciliation and factory-readiness step that preserves the already validated launch flow.
+
+### Immediate implementation blockers
+
+1. Consent must be enforced at both API and database boundaries.
+2. Launch-to-project mapping needs a durable, admin-reviewed association.
+3. Job and task creation must become atomic (or use a tested durable outbox).
+4. A stable unique launch-to-job handoff key and persisted launch association are needed before automatic handoff.
+5. No worker may claim jobs until atomic leases, consent revalidation, cancellation, retry limits and budget checks exist.
+
+This was a read-only audit. No customer data, RLS policy, schema, deployment or production code was changed.
