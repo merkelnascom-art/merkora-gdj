@@ -40,7 +40,7 @@ function makeRequest() {
   });
 }
 
-function mockCommercialFlow(options: { projectLinked?: boolean; consent?: boolean } = {}) {
+function mockCommercialFlow(options: { projectLinked?: boolean; consent?: boolean; existingJob?: boolean } = {}) {
   const projectLinked = options.projectLinked !== false;
   const approvalRows = options.consent === false
     ? approvals.map((item) => item.approval_kind === "client_scope" ? { ...item, ai_processing_consent: false } : item)
@@ -64,7 +64,7 @@ function mockCommercialFlow(options: { projectLinked?: boolean; consent?: boolea
     if (method === "GET" && path.startsWith("user_projects?select=id,user_id")) return { ok: true, status: 200, data: projectLinked ? [{ id: projectId, user_id: ownerId }] : [] };
     if (method === "GET" && path.startsWith("project_memory_plan_versions?select=")) return { ok: true, status: 200, data: [plan] };
     if (method === "GET" && path.startsWith("project_memory_approvals?select=")) return { ok: true, status: 200, data: approvalRows };
-    if (method === "GET" && path.startsWith("project_factory_jobs?select=")) return { ok: true, status: 200, data: [] };
+    if (method === "GET" && path.startsWith("project_factory_jobs?select=")) return { ok: true, status: 200, data: options.existingJob ? [{ id: "job-existing", status: "queued" }] : [] };
     if (method === "POST" && path === "rpc/create_factory_job_with_tasks") return { ok: true, status: 200, data: { job_id: "job-1", task_count: 5 } };
     return { ok: true, status: 200, data: [] };
   });
@@ -98,6 +98,15 @@ describe("POST /api/admin/project-launches", () => {
     const result = await response.json();
     expect(response.status).toBe(200);
     expect(result.factoryHandoff.status).toBe("needs_project_link");
+    expect(vi.mocked(callUserData).mock.calls.some(([path]) => path === "rpc/create_factory_job_with_tasks")).toBe(false);
+  });
+
+  it("does not create a duplicate factory job for the same commercial launch", async () => {
+    mockCommercialFlow({ existingJob: true });
+    const response = await POST(makeRequest());
+    const result = await response.json();
+    expect(response.status).toBe(200);
+    expect(result.factoryHandoff).toMatchObject({ status: "already_queued", jobId: "job-existing", jobStatus: "queued" });
     expect(vi.mocked(callUserData).mock.calls.some(([path]) => path === "rpc/create_factory_job_with_tasks")).toBe(false);
   });
 
