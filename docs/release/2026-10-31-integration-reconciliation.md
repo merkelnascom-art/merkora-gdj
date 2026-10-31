@@ -98,3 +98,26 @@ This branch is not a production release and must not be promoted until the verif
 ## Safety status
 
 No Supabase schema or customer data was changed to create this branch. No Vercel deployment was triggered. Production was not modified.
+
+
+## Read-only database relationship check (2026-10-31)
+
+Supabase schema and existing records were inspected read-only after this branch was created.
+
+- `client_requests.project_id` is text and identifies the project slug used by the commercial request.
+- `user_projects.id` is also text and is the foreign-key target for factory plans, approvals and jobs.
+- A join on both `client_requests.project_id = user_projects.id` and `client_requests.user_id = user_projects.user_id` matched **Student Vision** exactly.
+- The same join did **not** match **Love Ways**. Its commercial request and official launch exist, but no corresponding `user_projects` row exists for that owner/project key.
+- Both existing launch rows remain untouched. No project row, plan, approval, factory job or task was inserted.
+
+### Consequence
+
+A launch-to-factory handoff can be safely associated by the exact `project_id` + owner pair only when that matching `user_projects` record exists. Do not create a replacement project silently for Love Ways, do not match by title alone, and do not use the client's email as an ownership key.
+
+Before Love Ways can enter the factory, the product needs an explicit admin-reviewed reconciliation action that either:
+1. links its existing request to an already-existing owner-matched `user_projects` record; or
+2. creates a new `user_projects` record through the normal project-creation flow and stores a durable association to the existing request.
+
+The second option is a data mutation and must be separately reviewed, must preserve the original request/quote/invoice/payment/launch records, and must not duplicate the commercial project.
+
+Student Vision has a relational match, but factory execution still remains blocked until its exact plan, three approvals and AI-processing consent exist. The current database inspection showed zero factory jobs and zero approval rows at the time of the read.
