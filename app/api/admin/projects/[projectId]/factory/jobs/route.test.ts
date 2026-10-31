@@ -14,6 +14,7 @@ const plan = { version: 3, source_brief_version: 2, payload: { includedScope: [{
 const approvalRows = ["client_scope", "admin_review", "execution_authorization"].map((approval_kind, index) => ({
   id: `approval-${index + 1}`, approval_kind, decision: "approved",
   plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
+  ai_processing_consent: approval_kind === "client_scope",
 }));
 const body = { planVersion: 3, correlationId: "b2c3d4e5-f678-4123-8abc-1234567890ab" };
 const context = { params: Promise.resolve({ projectId: "MK-PROJECT-001" }) };
@@ -60,6 +61,18 @@ describe("POST /api/admin/projects/[projectId]/factory/jobs", () => {
     const response = await POST(makeRequest(), context);
     expect(response.status).toBe(409);
     expect((await response.json()).missingApprovals).toEqual(["execution_authorization"]);
+    expect(callUserData).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks factory creation when client AI-processing consent is absent", async () => {
+    const approvalsWithoutConsent = approvalRows.map((row) =>
+      row.approval_kind === "client_scope" ? { ...row, ai_processing_consent: false } : row);
+    vi.mocked(callUserData).mockReset()
+      .mockResolvedValueOnce({ ok: true, status: 200, data: [plan] })
+      .mockResolvedValueOnce({ ok: true, status: 200, data: approvalsWithoutConsent });
+    const response = await POST(makeRequest(), context);
+    expect(response.status).toBe(409);
+    expect((await response.json()).missingConsent).toBe("client_scope");
     expect(callUserData).toHaveBeenCalledTimes(2);
   });
 
