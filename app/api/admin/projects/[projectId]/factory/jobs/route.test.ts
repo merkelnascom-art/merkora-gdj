@@ -33,8 +33,7 @@ beforeEach(() => {
     .mockResolvedValueOnce({ ok: true, status: 200, data: [plan] })
     .mockResolvedValueOnce({ ok: true, status: 200, data: approvalRows })
     .mockResolvedValueOnce({ ok: true, status: 200, data: [] })
-    .mockResolvedValueOnce({ ok: true, status: 201, data: [{ id: "job-1" }] })
-    .mockResolvedValueOnce({ ok: true, status: 201, data: [{ id: "task-1" }] });
+    .mockResolvedValueOnce({ ok: true, status: 200, data: { job_id: "job-1", task_count: 5 } });
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -82,18 +81,16 @@ describe("POST /api/admin/projects/[projectId]/factory/jobs", () => {
     expect(response.status).toBe(200);
     expect(result).toMatchObject({ created: true, jobId: "job-1", status: "queued", taskCount: 5, executionStarted: false });
     const calls = vi.mocked(callUserData).mock.calls;
-    expect(calls[3][0]).toBe("project_factory_jobs");
-    const jobPayload = calls[3][3] as Record<string, unknown>;
-    expect(jobPayload).toMatchObject({
+    expect(calls[3][0]).toBe("rpc/create_factory_job_with_tasks");
+    const rpcPayload = calls[3][3] as { p_job: Record<string, unknown>; p_tasks: Array<Record<string, unknown>> };
+    expect(rpcPayload.p_job).toMatchObject({
       plan_version: 3, plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
       requested_by: user.id, authorized_by: user.id,
       approval_ids: ["approval-1", "approval-2", "approval-3"],
     });
-    expect((jobPayload.manifest as Record<string, unknown>).approvalIds).toEqual(["approval-1", "approval-2", "approval-3"]);
-    expect(calls[4][0]).toBe("project_factory_tasks");
-    const taskPayload = calls[4][3] as Array<Record<string, unknown>>;
-    expect(taskPayload).toHaveLength(5);
-    expect(taskPayload[1]).toMatchObject({ task_key: "generate_application", dependencies: ["prepare_specification"] });
+    expect((rpcPayload.p_job.manifest as Record<string, unknown>).approvalIds).toEqual(["approval-1", "approval-2", "approval-3"]);
+    expect(rpcPayload.p_tasks).toHaveLength(5);
+    expect(rpcPayload.p_tasks[1]).toMatchObject({ task_key: "generate_application", dependencies: ["prepare_specification"] });
   });
 
   it("does not create a second job for an existing correlation id", async () => {
