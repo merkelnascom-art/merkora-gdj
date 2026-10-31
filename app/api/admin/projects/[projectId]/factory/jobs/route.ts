@@ -56,7 +56,7 @@ export async function POST(request: Request, context: { params: Promise<{ projec
     }
 
     const approvalResult = await callUserData(
-      `project_memory_approvals?select=id,approval_kind,decision,plan_digest,scope_digest&project_id=eq.${encodeURIComponent(projectId)}&plan_version=eq.${body.planVersion}`,
+      `project_memory_approvals?select=id,approval_kind,decision,plan_digest,scope_digest,ai_processing_consent&project_id=eq.${encodeURIComponent(projectId)}&plan_version=eq.${body.planVersion}`,
       "GET", token,
     );
     if (!approvalResult.ok) return NextResponse.json({ error: "Impossible de vérifier les validations." }, { status: 502 });
@@ -66,8 +66,10 @@ export async function POST(request: Request, context: { params: Promise<{ projec
       item.plan_digest === plan.payload_digest && item.scope_digest === plan.scope_digest);
     const exactApproved = new Set(exactApprovalRows.map((item) => item.approval_kind));
     const missing = REQUIRED_APPROVALS.filter((kind) => !exactApproved.has(kind));
-    if (missing.length) {
-      return NextResponse.json({ error: "Le lancement est bloqué : les trois validations exactes sont obligatoires.", missingApprovals: missing }, { status: 409 });
+    const hasExplicitAiConsent = exactApprovalRows.some((item) =>
+      item.approval_kind === "client_scope" && item.ai_processing_consent === true);
+    if (missing.length || !hasExplicitAiConsent) {
+      return NextResponse.json({ error: "Le lancement est bloqué : les trois validations exactes sont obligatoires.", missingApprovals: missing, ...(hasExplicitAiConsent ? {} : { missingConsent: "client_scope" }) }, { status: 409 });
     }
 
     const existing = await callUserData(
