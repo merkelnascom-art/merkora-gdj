@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getAdminAccess } from "@/lib/server/admin-access";
+import { evaluateLaunchFactoryHandoff } from "@/lib/factory/launch-factory-handoff";
 import { callUserData, getAccessToken, isSameOrigin } from "@/lib/server/supabase-rest";
 
 export const dynamic = "force-dynamic";
@@ -8,6 +9,14 @@ const fail = (status: number, error: string) => NextResponse.json({ error }, { s
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
 
 type Row = Record<string, unknown>;
+
+const FACTORY_TASKS = [
+  { task_key: "prepare_specification", state: "not_started", dependencies: [], evidence_required: true, external_side_effect: false, result_is_known: true },
+  { task_key: "generate_application", state: "not_started", dependencies: ["prepare_specification"], evidence_required: true, external_side_effect: false, result_is_known: true },
+  { task_key: "run_quality_checks", state: "not_started", dependencies: ["generate_application"], evidence_required: true, external_side_effect: false, result_is_known: true },
+  { task_key: "repair_and_retest", state: "not_started", dependencies: ["run_quality_checks"], evidence_required: true, external_side_effect: false, result_is_known: true },
+  { task_key: "human_delivery_review", state: "not_started", dependencies: ["repair_and_retest"], evidence_required: true, external_side_effect: true, result_is_known: true },
+];
 
 export async function GET() {
   const access = await getAdminAccess();
@@ -143,13 +152,147 @@ export async function POST(request: Request) {
       { admin_status: "in_progress", updated_at: new Date().toISOString() },
       "return=representation",
     );
-    const launch = Array.isArray(saved.data) ? saved.data[0] : null;
+    const launch = Array.isArray(saved.data) ? saved.data[0] as Row | undefined : undefined;
+    let factoryHandoff: Row = {
+      status: "handoff_pending",
+      message: "Le lancement est enregistré ; la préparation de fabrication doit être réconciliée.",
+    };
+
+    // The commercial launch is the durable handoff key. Queue only when the
+    // exact request, owner-matched project, plan, approvals and AI consent exist.
+    if (launch && uuid(launch.id)) {
+      const requestLink = await callUserData(
+        `client_requests?select=id,user_id,project_id&id=eq.${encodeURIComponent(quote.request_id)}&user_id=eq.${encodeURIComponent(invoice.client_user_id)}&limit=1`,
+        "GET", token,
+      );
+      if (requestLink.ok) {
+        const requestRows = Array.isArray(requestLink.data) ? requestLink.data as Row[] : [];
+        const requestRow = requestRows[0];
+        const projectId = typeof requestRow?.project_id === "string" ? requestRow.project_id : "";
+        const projectResult = projectId
+          ? await callUserData(
+              `user_projects?select=id,user_id&id=eq.${encodeURIComponent(projectId)}&user_id=eq.${encodeURIComponent(invoice.client_user_id)}&limit=1`,
+              "GET", token,
+            )
+          : { ok: true, data: [] };
+
+        if (projectResult.ok) {
+          const projectRows = Array.isArray(projectResult.data) ? projectResult.data as Row[] : [];
+          const planResult = projectRows.length
+            ? await callUserData(
+                `project_memory_plan_versions?select=version,payload,payload_digest,scope_digest,source_brief_version&project_id=eq.${encodeURIComponent(projectId)}&order=version.desc&limit=1`,
+                "GET", token,
+              )
+            : { ok: true, data: [] };
+
+          if (planResult.ok) {
+            const planRows = Array.isArray(planResult.data) ? planResult.data as Row[] : [];
+            const latestPlan = planRows[0];
+            const approvalResult = latestPlan && Number.isSafeInteger(latestPlan.version)
+              ? await callUserData(
+                  `project_memory_approvals?select=id,project_id,plan_version,approval_kind,decision,plan_digest,scope_digest,ai_processing_consent&project_id=eq.${encodeURIComponent(projectId)}&plan_version=eq.${latestPlan.version}`,
+                  "GET", token,
+                )
+              : { ok: true, data: [] };
+
+            if (approvalResult.ok) {
+              const readiness = evaluateLaunchFactoryHandoff({
+                projectId,
+                ownerId: invoice.client_user_id,
+                requestId: quote.request_id,
+                requests: requestRows,
+                projects: projectRows,
+                plans: planRows,
+                approvals: Array.isArray(approvalResult.data) ? approvalResult.data : [],
+              });
+
+              if (readiness.status !== "ready") {
+                factoryHandoff = {
+                  status: readiness.status,
+                  message: readiness.status === "needs_project_link"
+                    ? "Le lancement est enregistré, mais le projet doit être associé au compte client exact avant fabrication."
+                    : readiness.status === "awaiting_plan"
+                      ? "Le lancement est enregistré. MerKora attend le plan de projet versionné."
+                      : "Le lancement est enregistré. MerKora attend les trois validations exactes et le consentement IA du client.",
+                  ...(readiness.status === "awaiting_approval"
+                    ? { missingApprovals: readiness.missingApprovals, missingConsent: readiness.missingConsent === true }
+                    : {}),
+                };
+              } else {
+                const existingJob = await callUserData(
+                  `project_factory_jobs?select=id,status&project_id=eq.${encodeURIComponent(projectId)}&correlation_id=eq.${encodeURIComponent(String(launch.id))}&limit=1`,
+                  "GET", token,
+                );
+                if (!existingJob.ok) {
+                  factoryHandoff = { status: "handoff_pending", message: "Le lancement est enregistré ; la vérification d'un travail déjà créé a échoué." };
+                } else if (Array.isArray(existingJob.data) && existingJob.data.length) {
+                  const existingRow = existingJob.data[0] as Row;
+                  factoryHandoff = { status: "already_queued", jobId: existingRow.id, jobStatus: existingRow.status };
+                } else {
+                  const handoff = await callUserData("rpc/create_factory_job_with_tasks", "POST", token, {
+                    p_job: {
+                      project_id: projectId,
+                      plan_version: readiness.planVersion,
+                      plan_digest: readiness.planDigest,
+                      scope_digest: readiness.scopeDigest,
+                      status: "queued",
+                      manifest: {
+                        schemaVersion: 1,
+                        kind: "merkora_project_factory_job",
+                        projectId,
+                        planVersion: readiness.planVersion,
+                        sourceBriefVersion: readiness.sourceBriefVersion,
+                        approvalIds: readiness.approvalIds,
+                        commercialLaunchId: launch.id,
+                        stages: FACTORY_TASKS.map((task) => task.task_key),
+                        executionMode: "manual_worker_required",
+                        deliveryRequiresHumanReview: true,
+                      },
+                      requested_by: access.user.id,
+                      authorized_by: access.user.id,
+                      approval_ids: readiness.approvalIds,
+                      correlation_id: launch.id,
+                    },
+                    p_tasks: FACTORY_TASKS,
+                  });
+                  const result = handoff.data && typeof handoff.data === "object" ? handoff.data as Row : {};
+                  if (handoff.ok && typeof result.job_id === "string" && result.task_count === FACTORY_TASKS.length) {
+                    factoryHandoff = {
+                      status: "queued",
+                      jobId: result.job_id,
+                      taskCount: result.task_count,
+                      executionStarted: false,
+                      message: "Le travail de fabrication est créé et attend le worker. Aucun modèle IA ni déploiement n'a été lancé.",
+                    };
+                  } else {
+                    factoryHandoff = {
+                      status: "handoff_pending",
+                      message: "Le lancement est enregistré, mais la création atomique du travail a échoué. Une réconciliation peut être relancée sans dupliquer le lancement.",
+                    };
+                  }
+                }
+              }
+            } else {
+              factoryHandoff = { status: "handoff_pending", message: "Le lancement est enregistré ; la vérification des validations n'a pas abouti." };
+            }
+          } else {
+            factoryHandoff = { status: "handoff_pending", message: "Le lancement est enregistré ; la lecture du plan n'a pas abouti." };
+          }
+        } else {
+          factoryHandoff = { status: "handoff_pending", message: "Le lancement est enregistré ; la vérification du projet client n'a pas abouti." };
+        }
+      } else {
+        factoryHandoff = { status: "handoff_pending", message: "Le lancement est enregistré ; la lecture de la demande commerciale n'a pas abouti." };
+      }
+    }
+
     return NextResponse.json({
       saved: true,
       launch,
+      factoryHandoff,
       statusUpdated: statusUpdate.ok && Array.isArray(statusUpdate.data) && statusUpdate.data.length > 0,
       message: statusUpdate.ok && Array.isArray(statusUpdate.data) && statusUpdate.data.length > 0
-        ? "Le lancement officiel est enregistré. Le client peut maintenant voir la confirmation dans son espace."
+        ? "Le lancement officiel est enregistré. MerKora prépare automatiquement la fabrication si le projet, le plan et les validations sont prêts."
         : "Le lancement officiel est enregistré et visible du client. Le statut administratif du dossier n’a pas pu être actualisé automatiquement.",
     });
   } catch {

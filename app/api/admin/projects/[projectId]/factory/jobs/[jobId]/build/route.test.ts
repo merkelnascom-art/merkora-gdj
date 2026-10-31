@@ -29,6 +29,7 @@ const plan = {
 const approvals = ["client_scope", "admin_review", "execution_authorization"].map((approval_kind, index) => ({
   id: `approval-${index + 1}`, approval_kind, decision: "approved",
   plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
+  ai_processing_consent: approval_kind === "client_scope",
 }));
 const job = {
   id: "b2c3d4e5-f678-4123-8abc-1234567890ab",
@@ -36,7 +37,7 @@ const job = {
   scope_digest: plan.scope_digest, approval_ids: ["approval-1", "approval-2", "approval-3"],
   correlation_id: "c2c3d4e5-f678-4123-8abc-1234567890ab", manifest: {},
 };
-const project = { id: "MK-PROJECT-001", title: "Aéro Service", problem: "Suivre les retards.", desired_outcome: "Gérer les présences." };
+const project = { id: "MK-PROJECT-001", user_id: "owner-1", title: "Aéro Service", problem: "Suivre les retards.", desired_outcome: "Gérer les présences." };
 const tasks = [
   "prepare_specification", "generate_application", "run_quality_checks",
   "repair_and_retest", "human_delivery_review",
@@ -66,6 +67,8 @@ beforeEach(() => {
     if (method === "GET" && path.startsWith("project_memory_plan_versions?select")) return { ok: true, status: 200, data: [plan] };
     if (method === "GET" && path.startsWith("project_memory_approvals?select")) return { ok: true, status: 200, data: approvals };
     if (method === "GET" && path.startsWith("user_projects?select")) return { ok: true, status: 200, data: [project] };
+    if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "d1c2d3e4-f567-4890-8abc-1234567890ab", user_id: "owner-1", project_id: project.id }] };
+    if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "d1c2d3e4-f567-4890-8abc-1234567890ab", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 20000 }] };
     if (method === "GET" && path.startsWith("project_factory_tasks?select")) return { ok: true, status: 200, data: tasks };
     if (method === "PATCH" && path.includes("status=eq.queued")) return { ok: true, status: 200, data: [{ ...job, status: "building" }] };
     if (method === "POST" && path === "project_factory_evidence") return { ok: true, status: 201, data: [
@@ -99,6 +102,38 @@ describe("POST factory job build", () => {
     expect(response.status).toBe(409);
     expect(runProjectBuildInSandbox).not.toHaveBeenCalled();
     expect(uploadUserStorageObject).not.toHaveBeenCalled();
+  });
+
+  it("does not build when the commercial launch has not reached its confirmed-payment threshold", async () => {
+    vi.mocked(callUserData).mockImplementation(async (path, method) => {
+      if (method === "GET" && path.startsWith("project_factory_jobs?select")) return { ok: true, status: 200, data: [job] };
+      if (method === "GET" && path.startsWith("project_memory_plan_versions?select")) return { ok: true, status: 200, data: [plan] };
+      if (method === "GET" && path.startsWith("project_memory_approvals?select")) return { ok: true, status: 200, data: approvals };
+      if (method === "GET" && path.startsWith("user_projects?select")) return { ok: true, status: 200, data: [project] };
+      if (method === "GET" && path.startsWith("client_requests?select")) return { ok: true, status: 200, data: [{ id: "d1c2d3e4-f567-4890-8abc-1234567890ab", user_id: "owner-1", project_id: project.id }] };
+      if (method === "GET" && path.startsWith("client_project_launches?select")) return { ok: true, status: 200, data: [{ request_id: "d1c2d3e4-f567-4890-8abc-1234567890ab", client_user_id: "owner-1", required_amount: 20000, confirmed_amount_at_launch: 19999 }] };
+      return { ok: true, status: 200, data: [] };
+    });
+    const response = await POST(request(), context);
+    expect(response.status).toBe(409);
+    expect((await response.json()).code).toBe("COMMERCIAL_LAUNCH_NOT_ELIGIBLE");
+    expect(runProjectBuildInSandbox).not.toHaveBeenCalled();
+    expect(uploadUserStorageObject).not.toHaveBeenCalled();
+  });
+
+  it("does not build without explicit client AI-processing consent", async () => {
+    const approvalsWithoutConsent = approvals.map((item) =>
+      item.approval_kind === "client_scope" ? { ...item, ai_processing_consent: false } : item);
+    vi.mocked(callUserData).mockImplementation(async (path, method) => {
+      if (method === "GET" && path.startsWith("project_factory_jobs?select")) return { ok: true, status: 200, data: [job] };
+      if (method === "GET" && path.startsWith("project_memory_plan_versions?select")) return { ok: true, status: 200, data: [plan] };
+      if (method === "GET" && path.startsWith("project_memory_approvals?select")) return { ok: true, status: 200, data: approvalsWithoutConsent };
+      return { ok: true, status: 200, data: [] };
+    });
+    const response = await POST(request(), context);
+    expect(response.status).toBe(409);
+    expect((await response.json()).missingConsent).toBe("client_scope");
+    expect(runProjectBuildInSandbox).not.toHaveBeenCalled();
   });
 
   it("rejects non-administrators before reading or claiming jobs", async () => {

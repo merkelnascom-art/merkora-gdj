@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createProjectMemoryDigest } from "@/lib/factory/project-memory-digest";
+import { evaluateCommercialLaunchEligibility } from "@/lib/factory/commercial-launch-eligibility";
 import { createProjectArchive } from "@/lib/factory/project-archive";
 import { generateProjectSource } from "@/lib/factory/project-generator";
 import { createVercelProjectSandbox } from "@/lib/factory/vercel-project-sandbox";
@@ -98,7 +99,7 @@ export async function POST(
     }
 
     const approvalResult = await callUserData(
-      `project_memory_approvals?select=id,approval_kind,decision,plan_digest,scope_digest&project_id=eq.${encodeURIComponent(projectId)}&plan_version=eq.${job.plan_version}`,
+      `project_memory_approvals?select=id,approval_kind,decision,plan_digest,scope_digest,ai_processing_consent&project_id=eq.${encodeURIComponent(projectId)}&plan_version=eq.${job.plan_version}`,
       "GET", token,
     );
     if (!approvalResult.ok) return NextResponse.json({ error: "Vérification des validations impossible." }, { status: 502 });
@@ -108,19 +109,76 @@ export async function POST(
     const approvalIds = new Set(job.approval_ids.filter((id): id is string => typeof id === "string"));
     const missing = REQUIRED_APPROVALS.filter((kind) =>
       !approvalRows.some((approval) => approval.approval_kind === kind && approvalIds.has(String(approval.id))));
-    if (missing.length) {
-      return NextResponse.json({ error: "Les trois validations liées à ce travail ne sont plus toutes valides.", missingApprovals: missing }, { status: 409 });
+    const hasClientAiConsent = approvalRows.some((approval) =>
+      approval.approval_kind === "client_scope" &&
+      approvalIds.has(String(approval.id)) &&
+      approval.ai_processing_consent === true);
+    if (missing.length || !hasClientAiConsent) {
+      return NextResponse.json({
+        error: "La fabrication exige les trois validations exactes et le consentement IA explicite du client.",
+        missingApprovals: missing,
+        missingConsent: hasClientAiConsent ? undefined : "client_scope",
+      }, { status: 409 });
     }
 
     const projectResult = await callUserData(
-      `user_projects?select=id,title,problem,desired_outcome&id=eq.${encodeURIComponent(projectId)}&limit=1`,
+      `user_projects?select=id,user_id,title,problem,desired_outcome&id=eq.${encodeURIComponent(projectId)}&limit=1`,
       "GET", token,
     );
     if (!projectResult.ok) return NextResponse.json({ error: "Lecture du projet impossible." }, { status: 502 });
     const project = rows(projectResult.data)[0];
-    if (!project || typeof project.title !== "string" || typeof project.problem !== "string" ||
+    if (!project || typeof project.user_id !== "string" ||
+      typeof project.title !== "string" || typeof project.problem !== "string" ||
       typeof project.desired_outcome !== "string") {
-      return NextResponse.json({ error: "Le dossier client est incomplet." }, { status: 409 });
+      return NextResponse.json({ error: "Le dossier client est incomplet ou sans propriétaire vérifiable." }, { status: 409 });
+    }
+
+    // Commercial authorization is re-checked immediately before claiming a worker slot.
+    // Never infer the request/project relationship from title or email.
+    const requestResult = await callUserData(
+      `client_requests?select=id,user_id,project_id&project_id=eq.${encodeURIComponent(projectId)}&user_id=eq.${encodeURIComponent(project.user_id)}`,
+      "GET", token,
+    );
+    if (!requestResult.ok) return NextResponse.json({ error: "Vérification de la demande commerciale impossible." }, { status: 502 });
+    const commercialRequests = rows(requestResult.data);
+    const requestIds = commercialRequests
+      .map((item) => item.id)
+      .filter((id): id is string => isUuid(id));
+    const launchResult = requestIds.length
+      ? await callUserData(
+          `client_project_launches?select=request_id,client_user_id,required_amount,confirmed_amount_at_launch&request_id=in.(${requestIds.join(",")})`,
+          "GET", token,
+        )
+      : { ok: true, data: [] };
+    if (!launchResult.ok) return NextResponse.json({ error: "Vérification du lancement et du paiement impossible." }, { status: 502 });
+
+    const launchEligibility = evaluateCommercialLaunchEligibility({
+      projectId,
+      projectOwnerId: project.user_id,
+      requests: commercialRequests.map((item) => ({
+        id: item.id, projectId: item.project_id, userId: item.user_id,
+      })),
+      launches: rows(launchResult.data).map((item) => ({
+        requestId: item.request_id,
+        clientUserId: item.client_user_id,
+        requiredAmount: item.required_amount,
+        confirmedAmountAtLaunch: item.confirmed_amount_at_launch,
+      })),
+    });
+    if (!launchEligibility.ok) {
+      const messages: Record<typeof launchEligibility.reason, string> = {
+        invalid_project_owner: "Le propriétaire du projet ne peut pas être vérifié.",
+        request_not_found: "Aucune demande commerciale liée au propriétaire exact de ce projet. Une réconciliation administrateur est nécessaire.",
+        launch_not_found: "La demande n'a pas encore de lancement commercial officiel.",
+        owner_mismatch: "Le lancement commercial appartient à un autre compte client.",
+        invalid_launch_record: "Les données du lancement commercial sont incomplètes ou invalides.",
+        insufficient_confirmed_payment: "Le seuil d'acompte confirmé enregistré au lancement n'est pas atteint.",
+      };
+      return NextResponse.json({
+        error: messages[launchEligibility.reason],
+        code: "COMMERCIAL_LAUNCH_NOT_ELIGIBLE",
+        reason: launchEligibility.reason,
+      }, { status: 409 });
     }
 
     const taskResult = await callUserData(
