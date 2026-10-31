@@ -14,7 +14,7 @@ const plan = {
 };
 const approvals = ["client_scope", "admin_review", "execution_authorization"].map((approval_kind, index) => ({
   id: `approval-${index + 1}`, approval_kind, decision: "approved",
-  plan_version: 2, plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
+  project_id: projectId, plan_version: 2, plan_digest: plan.payload_digest, scope_digest: plan.scope_digest,
   ai_processing_consent: approval_kind === "client_scope",
 }));
 const base = {
